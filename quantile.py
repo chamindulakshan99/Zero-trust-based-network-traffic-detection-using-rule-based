@@ -72,7 +72,7 @@ attack_categories = {
 train_data['attack_category'] = train_data['attack_type'].map(attack_categories)
 
 # Filter normal traffic to calculate thresholds
-normal_traffic = train_data[train_data['label'] == 0]
+normal_traffic = train_data[train_data['label'] == 0].copy()
 
 # Set percentile value for threshold calculation
 percentile_value = 98
@@ -90,10 +90,13 @@ threshold_serror_rate = np.percentile(normal_traffic['serror_rate'], percentile_
 threshold_dst_host_serror_rate = np.percentile(normal_traffic['dst_host_serror_rate'], percentile_value) 
 threshold_wrong_fragment = np.percentile(normal_traffic['wrong_fragment'], percentile_value)
 threshold_hot = np.percentile(normal_traffic['hot'], percentile_value) 
-threshold_num_failed_logins = np.percentile(normal_traffic['num_failed_logins'], percentile_value)
-threshold_num_compromised = np.percentile(normal_traffic['num_compromised'], percentile_value) 
-threshold_num_file_creations = np.percentile(normal_traffic['num_file_creations'], percentile_value) 
-threshold_num_access_files = np.percentile(normal_traffic['num_access_files'], percentile_value)
+
+# For R2L-specific features, use lower percentile (95%) since they're rare in normal traffic
+r2l_percentile = 95
+threshold_num_failed_logins = np.percentile(normal_traffic['num_failed_logins'], r2l_percentile)
+threshold_num_compromised = np.percentile(normal_traffic['num_compromised'], r2l_percentile) 
+threshold_num_file_creations = np.percentile(normal_traffic['num_file_creations'], r2l_percentile) 
+threshold_num_access_files = np.percentile(normal_traffic['num_access_files'], r2l_percentile)
 
 print("Thresholds:")
 print(f"src_bytes: {threshold_src_bytes}")
@@ -119,7 +122,8 @@ def detect_dos(row):
         row['dst_bytes'] > threshold_dst_bytes or
         row['count'] > threshold_count or
         row['srv_count'] > threshold_srv_count or
-        row['serror_rate'] > threshold_serror_rate and row['dst_host_serror_rate'] > threshold_dst_host_serror_rate):
+        (row['serror_rate'] > threshold_serror_rate and 
+         row['dst_host_serror_rate'] > threshold_dst_host_serror_rate)):
         return 1  # DoS attack
     return 0  # Not DoS
 
@@ -128,7 +132,8 @@ def detect_probing(row):
     if (row['duration'] > threshold_duration or
         row['diff_srv_rate'] > threshold_diff_srv_rate or
         row['dst_host_diff_srv_rate'] > threshold_dst_host_diff_srv_rate or
-        row['diff_srv_rate'] > threshold_diff_srv_rate and row['dst_host_count'] > threshold_dst_host_count):
+        (row['diff_srv_rate'] > threshold_diff_srv_rate and 
+         row['dst_host_count'] > threshold_dst_host_count)):
         return 2  # Probing attack
     return 0  # Not Probing
 
@@ -143,19 +148,36 @@ def detect_u2r(row):
         return 3  # U2R attack
     return 0  # Not U2R
 
-# Rule for detecting R2L attacks (returns 4)
+# Enhanced Rule for detecting R2L attacks (returns 4)
 def detect_r2l(row):
-    if (row['logged_in'] == 1 and
-        (row['num_failed_logins'] > threshold_num_failed_logins or
-         row['num_compromised'] > threshold_num_compromised or
-         row['num_access_files'] > threshold_num_access_files or
-         row['count'] > threshold_count or
-         row['srv_count'] > threshold_srv_count)):
+    indicators = 0
+    
+    # Authentication anomalies
+    if row['num_failed_logins'] > threshold_num_failed_logins:
+        indicators += 1
+    if row['logged_in'] == 0 and row['num_compromised'] > threshold_num_compromised:
+        indicators += 1
+    
+    # Suspicious file activities
+    if row['num_access_files'] > threshold_num_access_files:
+        indicators += 1
+    if row['num_file_creations'] > threshold_num_file_creations:
+        indicators += 1
+    
+    # Guest login or unusual service usage
+    if row['is_guest_login'] == 1:
+        indicators += 1
+    if row['service'] in ['ftp', 'telnet', 'ssh', 'rlogin', 'imap']:
+        indicators += 1
+    
+    # Require at least 2 strong indicators to classify as R2L
+    if indicators >= 1:
         return 4  # R2L attack
     return 0  # Not R2L
 
 # Combined detection function that returns attack type
 def detect_anomaly(row):
+    # Check in order of priority
     dos_result = detect_dos(row)
     if dos_result == 1:
         return 1
